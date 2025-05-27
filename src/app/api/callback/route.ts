@@ -3,19 +3,45 @@ import { db } from '@/lib/firebase';
 import { collection, addDoc } from 'firebase/firestore';
 import twilio from 'twilio';
 
-const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER as string;
-if (!twilioPhoneNumber) {
-  throw new Error('TWILIO_PHONE_NUMBER environment variable is required');
-}
-
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
-
 export async function POST(request: Request) {
   try {
+    const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER as string;
+    const vapiApiKey = process.env.VAPI_API_KEY as string;
+    const twilioAccountSid = process.env.TWILIO_ACCOUNT_SID as string;
+    const twilioAuthToken = process.env.TWILIO_AUTH_TOKEN as string;
+
+    // Validate all required environment variables
+    if (!twilioPhoneNumber) {
+      return NextResponse.json(
+        { error: 'TWILIO_PHONE_NUMBER environment variable is required' },
+        { status: 500 }
+      );
+    }
+
+    if (!vapiApiKey) {
+      return NextResponse.json(
+        { error: 'VAPI_API_KEY environment variable is required' },
+        { status: 500 }
+      );
+    }
+
+    if (!twilioAccountSid || !twilioAuthToken) {
+      return NextResponse.json(
+        { error: 'TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN environment variables are required' },
+        { status: 500 }
+      );
+    }
+
+    const twilioClient = twilio(twilioAccountSid, twilioAuthToken);
+
     const { phone, email } = await request.json();
+
+    if (!phone || !email) {
+      return NextResponse.json(
+        { error: 'Phone and email are required' },
+        { status: 400 }
+      );
+    }
 
     // Store the callback request in Firestore
     const callbackRef = await addDoc(collection(db, 'callbacks'), {
@@ -25,38 +51,14 @@ export async function POST(request: Request) {
       createdAt: new Date().toISOString(),
     });
 
-    // Create Vapi assistant for the conversation
-    const assistantResponse = await fetch('https://api.vapi.ai/assistant', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.VAPI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        name: 'Callback Assistant',
-        model: 'gpt-4',
-        systemPrompt: `You are a professional callback assistant. Your task is to:
-          1. Greet the user professionally
-          2. Collect information about their consultation needs:
-             - Type of consultation
-             - Category
-             - Country
-             - Language preference
-             - Urgency level
-             - Address (if necessary)
-             - Summary of their request
-          3. Be conversational and natural in your interaction
-          4. Once all information is collected, inform them that they will receive an email with a secure link
-          5. Thank them for their time`,
-        voice: 'alloy',
-      }),
-    });
-
-    if (!assistantResponse.ok) {
-      throw new Error('Failed to create Vapi assistant');
+    // Use existing Vapi assistant
+    const vapiAssistantId = process.env.VAPI_ASSISTANT_ID;
+    if (!vapiAssistantId) {
+      return NextResponse.json(
+        { error: 'VAPI_ASSISTANT_ID environment variable is required' },
+        { status: 500 }
+      );
     }
-
-    const assistant = await assistantResponse.json();
 
     // Initialize the call using Twilio with Vapi integration
     const call = await twilioClient.calls.create({
@@ -64,7 +66,7 @@ export async function POST(request: Request) {
       from: twilioPhoneNumber,
       twiml: `<Response>
         <Connect>
-          <Stream url="wss://api.vapi.ai/stream/${assistant.id}">
+          <Stream url="wss://api.vapi.ai/streams/${vapiAssistantId}?environment=production&mode=production">
             <Parameter name="phone" value="${phone}"/>
             <Parameter name="email" value="${email}"/>
             <Parameter name="callbackId" value="${callbackRef.id}"/>
@@ -79,12 +81,12 @@ export async function POST(request: Request) {
     return NextResponse.json({
       requestId: callbackRef.id,
       callId: call.sid,
-      assistantId: assistant.id,
+      assistantId: vapiAssistantId,
     });
   } catch (error) {
     console.error('Error processing callback request:', error);
     return NextResponse.json(
-      { error: 'Failed to process callback request' },
+      { error: error instanceof Error ? error.message : 'Failed to process callback request' },
       { status: 500 }
     );
   }
